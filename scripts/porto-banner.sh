@@ -71,6 +71,21 @@ get_memory() {
     fi
 }
 
+get_memory_usage_percent() {
+    if [[ -r /proc/meminfo ]]; then
+        awk '
+            /^MemTotal:/ {total = $2}
+            /^MemAvailable:/ {available = $2}
+            END {
+                if (total > 0) printf "%d", ((total - available) / total) * 100
+                else print "N/D"
+            }
+        ' /proc/meminfo
+    else
+        printf '%s' 'N/D'
+    fi
+}
+
 get_swap() {
     if command_exists free; then
         free -h 2>/dev/null | awk '/^Swap:/ {printf "%s total | %s usado | %s livre", $2, $3, $4}'
@@ -152,6 +167,17 @@ get_io_pressure() {
     fi
 }
 
+get_io_status() {
+    if [[ -r /proc/pressure/io ]]; then
+        local avg10
+        avg10=$(awk '/^some / {for (i = 1; i <= NF; i++) if ($i ~ /^avg10=/) {sub("avg10=", "", $i); print $i; exit}}' /proc/pressure/io)
+        awk -v pressure="${avg10:-0}" 'BEGIN {exit !(pressure >= 10)}'
+        [[ $? -eq 0 ]] && printf '%s' 'problem' || printf '%s' 'ok'
+    else
+        printf '%s' 'ok'
+    fi
+}
+
 get_zombie_count() {
     if [[ -r /proc ]]; then
         local count
@@ -188,26 +214,51 @@ get_network_health() {
 get_patch_count() {
     local os_id=${ID:-unknown}
     local count='N/D'
+    local timeout_seconds=${PORTO_UPDATE_TIMEOUT:-8}
+    local output=''
+    local command_status=0
+
+    if ! command_exists timeout; then
+        printf '%s' 'N/D - comando timeout indisponivel'
+        return
+    fi
 
     case "$os_id" in
         rhel|rocky|almalinux|centos|fedora)
             if command_exists dnf; then
-                count=$(dnf -q list --upgrades 2>/dev/null \
-                    | awk 'NF >= 3 && $1 !~ /^(Installed|Available|Last|Obsoleting|Updating|Security:)/ {total++} END {print total + 0}')
+                output=$(timeout --signal=TERM "${timeout_seconds}s" dnf -q --cacheonly list --upgrades 2>/dev/null) || command_status=$?
+                if [[ "$command_status" -eq 0 ]]; then
+                    count=$(printf '%s\n' "$output" \
+                        | awk 'NF >= 3 && $1 !~ /^(Installed|Available|Last|Obsoleting|Updating|Security:)/ {total++} END {print total + 0}')
+                fi
             elif command_exists yum; then
-                count=$(yum -q check-update 2>/dev/null \
-                    | awk 'NF >= 3 && $1 !~ /^(Loaded|Last|Obsoleting|Security:)/ {total++} END {print total + 0}')
+                output=$(timeout --signal=TERM "${timeout_seconds}s" yum -q --cacheonly check-update 2>/dev/null) || command_status=$?
+                if [[ "$command_status" -eq 0 || "$command_status" -eq 100 ]]; then
+                    count=$(printf '%s\n' "$output" \
+                        | awk 'NF >= 3 && $1 !~ /^(Loaded|Last|Obsoleting|Security:)/ {total++} END {print total + 0}')
+                fi
             fi
             ;;
         sles|opensuse*|suse)
             if command_exists zypper; then
-                count=$(zypper --non-interactive --quiet list-updates 2>/dev/null \
-                    | awk -F'|' '/^[[:space:]]*[v>][[:space:]]*\|/ {total++} END {print total + 0}')
+                output=$(timeout --signal=TERM "${timeout_seconds}s" zypper --non-interactive --quiet --no-refresh list-updates 2>/dev/null) || command_status=$?
+                if [[ "$command_status" -eq 0 ]]; then
+                    count=$(printf '%s\n' "$output" \
+                        | awk -F'|' '/^[[:space:]]*[v>][[:space:]]*\|/ {total++} END {print total + 0}')
+                fi
             fi
             ;;
     esac
 
-    [[ "$count" =~ ^[0-9]+$ ]] && printf '%s' "$count" || printf '%s' 'N/D'
+    if [[ "$command_status" -eq 124 ]]; then
+        printf '%s' "N/D - consulta excedeu ${timeout_seconds}s"
+    elif [[ "$count" =~ ^[0-9]+$ ]]; then
+        printf '%s' "$count"
+    elif [[ "$count" == 'N/D' ]]; then
+        printf '%s' 'N/D - gerenciador indisponivel'
+    else
+        printf '%s' 'N/D - falha na consulta'
+    fi
 }
 
 get_last_os_update() {
@@ -256,6 +307,18 @@ get_load() {
     fi
 }
 
+get_load_status() {
+    if [[ -r /proc/loadavg ]]; then
+        local load_one cpu_count
+        load_one=$(awk '{print $1}' /proc/loadavg)
+        cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')
+        awk -v load_value="$load_one" -v cpus="$cpu_count" 'BEGIN {exit !(load_value >= cpus * 0.85)}'
+        [[ $? -eq 0 ]] && printf '%s' 'problem' || printf '%s' 'ok'
+    else
+        printf '%s' 'ok'
+    fi
+}
+
 get_uptime() {
     if [[ -r /proc/uptime ]]; then
         awk '{
@@ -275,7 +338,17 @@ get_uptime() {
 print_line() {
     local label=$1
     local value=$2
-    printf '  %b%-22s%b %s\n' "$WHITE" "$label" "$RESET" "$(value_or_unknown "$value")"
+    printf '  %b%-22s%b %b%s%b\n' "$WHITE" "$label" "$RESET" "$GREEN" "$(value_or_unknown "$value")" "$RESET"
+}
+
+print_status_line() {
+    local label=$1
+    local value=$2
+    local status=$3
+    local status_color=$RED
+
+    [[ "$status" == 'ok' ]] && status_color=$GREEN
+    printf '  %b%-22s%b %b%s%b\n' "$WHITE" "$label" "$RESET" "$status_color" "$(value_or_unknown "$value")" "$RESET"
 }
 
 # Carrega identificadores da distribuicao sem assumir uma familia especifica.
@@ -301,12 +374,13 @@ DISK_IO=$(get_disk_io)
 IO_PRESSURE=$(get_io_pressure)
 ZOMBIE_COUNT=$(get_zombie_count)
 NETWORK_HEALTH=$(get_network_health)
-PATCH_COUNT=$(get_patch_count)
-LAST_OS_UPDATE=$(get_last_os_update)
 LAST_REBOOT=$(get_last_reboot)
 KERNEL=$(uname -r 2>/dev/null)
 CPU_COUNT=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '%s' 'N/D')
 CPU_MODEL=$(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo 2>/dev/null)
+MEMORY_USAGE_PERCENT=$(get_memory_usage_percent)
+LOAD_STATUS=$(get_load_status)
+IO_STATUS=$(get_io_status)
 
 printf '\n'
 color "$CYAN" '============================================================'; printf '\n'
@@ -323,29 +397,53 @@ print_line 'TIPO' "$VIRTUALIZATION"
 print_line 'DATA / TIMEZONE' "$(date '+%d/%m/%Y %H:%M:%S') / $(value_or_unknown "$TIMEZONE")"
 print_line 'UPTIME' "$UPTIME_VALUE"
 print_line 'CPU' "${CPU_MODEL:-N/D} (${CPU_COUNT} core(s))"
-print_line 'LOAD AVERAGE' "$LOAD_VALUE"
-print_line 'MEMORIA' "$MEMORY_VALUE"
-print_line 'SWAP' "$SWAP_VALUE"
-print_line 'DISCO > 85%' "$DISK_ALERTS"
-print_line 'INODES > 85%' "$INODE_ALERTS"
-print_line 'DISK I/O' "$DISK_IO"
-print_line 'IO PRESSURE' "$IO_PRESSURE"
-print_line 'REDE' "$NETWORK_HEALTH"
-
-if [[ "$ZOMBIE_COUNT" == '0' ]]; then
-    printf '  %b%-22s%b %b%s%b\n' "$WHITE" 'PROCESSOS ZUMBIS' "$RESET" "$GREEN" '0' "$RESET"
-elif [[ "$ZOMBIE_COUNT" == 'N/D' ]]; then
-    printf '  %b%-22s%b %b%s%b\n' "$WHITE" 'PROCESSOS ZUMBIS' "$RESET" "$YELLOW" 'N/D' "$RESET"
+print_status_line 'LOAD AVERAGE' "$LOAD_VALUE" "$LOAD_STATUS"
+if [[ "$MEMORY_USAGE_PERCENT" =~ ^[0-9]+$ && "$MEMORY_USAGE_PERCENT" -lt 85 ]]; then
+    print_status_line 'MEMORIA' "$MEMORY_VALUE (${MEMORY_USAGE_PERCENT}% usado)" 'ok'
 else
-    printf '  %b%-22s%b %b%s - investigar processos pais%b\n' "$WHITE" 'PROCESSOS ZUMBIS' "$RESET" "$YELLOW" "$ZOMBIE_COUNT" "$RESET"
+    print_status_line 'MEMORIA' "$MEMORY_VALUE (${MEMORY_USAGE_PERCENT}% usado)" 'problem'
+fi
+print_line 'SWAP' "$SWAP_VALUE"
+if [[ "$DISK_ALERTS" == OK* ]]; then
+    print_status_line 'DISCO > 85%' "$DISK_ALERTS" 'ok'
+else
+    print_status_line 'DISCO > 85%' "$DISK_ALERTS" 'problem'
+fi
+if [[ "$INODE_ALERTS" == OK* ]]; then
+    print_status_line 'INODES > 85%' "$INODE_ALERTS" 'ok'
+else
+    print_status_line 'INODES > 85%' "$INODE_ALERTS" 'problem'
+fi
+if [[ "$DISK_ALERTS" == OK* && "$INODE_ALERTS" == OK* && "$IO_STATUS" == 'ok' ]]; then
+    print_status_line 'DISK I/O' "$DISK_IO" 'ok'
+    print_status_line 'IO PRESSURE' "$IO_PRESSURE" 'ok'
+else
+    print_status_line 'DISK I/O' "$DISK_IO" 'problem'
+    print_status_line 'IO PRESSURE' "$IO_PRESSURE" 'problem'
+fi
+if [[ "$NETWORK_HEALTH" =~ erros[[:space:]]+0/0.*drops[[:space:]]+0/0 ]]; then
+    print_status_line 'REDE' "$NETWORK_HEALTH" 'ok'
+else
+    print_status_line 'REDE' "$NETWORK_HEALTH" 'problem'
 fi
 
-if [[ "$PATCH_COUNT" == '0' ]]; then
-    printf '  %b%-22s%b %b%s%b\n' "$WHITE" 'PATCHES PENDENTES' "$RESET" "$GREEN" '0 - sistema atualizado' "$RESET"
-elif [[ "$PATCH_COUNT" == 'N/D' ]]; then
-    printf '  %b%-22s%b %b%s%b\n' "$WHITE" 'PATCHES PENDENTES' "$RESET" "$YELLOW" 'N/D - gerenciador indisponivel' "$RESET"
+if [[ "$ZOMBIE_COUNT" == '0' ]]; then
+    print_status_line 'PROCESSOS ZUMBIS' '0' 'ok'
 else
-    printf '  %b%-22s%b %b%s pacote(s) disponivel(is)%b\n' "$WHITE" 'PATCHES PENDENTES' "$RESET" "$YELLOW" "$PATCH_COUNT" "$RESET"
+    print_status_line 'PROCESSOS ZUMBIS' "$ZOMBIE_COUNT - investigar processos pais" 'problem'
+fi
+
+PATCH_COUNT=$(get_patch_count)
+LAST_OS_UPDATE=$(get_last_os_update)
+
+if [[ "$PATCH_COUNT" == '0' ]]; then
+    print_status_line 'UPDATES PENDENTES' '0 - sistema atualizado' 'ok'
+else
+    if [[ "$PATCH_COUNT" == N/D* ]]; then
+        print_status_line 'UPDATES PENDENTES' "$PATCH_COUNT" 'problem'
+    else
+        print_status_line 'UPDATES PENDENTES' "$PATCH_COUNT pacote(s) disponivel(is)" 'problem'
+    fi
 fi
 print_line 'ULTIMA ATUALIZACAO SO' "$LAST_OS_UPDATE"
 print_line 'ULTIMO REBOOT' "$LAST_REBOOT"
