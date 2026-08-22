@@ -2,8 +2,6 @@
 # Banner de login para servidores Linux Red Hat/Rocky/Alma e SUSE.
 # O script somente exibe informacoes; nao altera o ambiente da sessao.
 
-set -u
-
 readonly RESET='\033[0m'
 readonly RED='\033[1;31m'
 readonly GREEN='\033[1;32m'
@@ -164,6 +162,13 @@ get_disk_io() {
 get_io_pressure() {
     if [[ -r /proc/pressure/io ]]; then
         awk '/^some / {some = $2 " " $3 " " $4} /^full / {full = $2 " " $3 " " $4} END {printf "some [%s] | full [%s] (avg10 avg60 avg300)", some, full}' /proc/pressure/io
+    elif [[ -r /proc/stat ]]; then
+        local iowait user_hz
+        iowait=$(awk '/^cpu / {print $6; exit}' /proc/stat)
+        user_hz=$(getconf CLK_TCK 2>/dev/null || printf '100')
+        if [[ "$iowait" =~ ^[0-9]+$ && "$user_hz" =~ ^[0-9]+$ && "$user_hz" -gt 0 ]]; then
+            awk -v ticks="$iowait" -v hz="$user_hz" 'BEGIN {printf "iowait %.1fs acumulado (PSI indisponivel)", ticks / hz}'
+        fi
     fi
 }
 
@@ -212,77 +217,27 @@ get_network_health() {
 }
 
 get_patch_count() {
-    local os_id=${ID:-unknown}
-    local count='N/D'
-    local timeout_seconds=${PORTO_UPDATE_TIMEOUT:-8}
-    local output=''
-    local command_status=0
+    local cache_file=${PORTO_UPDATE_CACHE:-/var/cache/porto-banner/updates}
+    local count=''
 
-    if ! command_exists timeout; then
-        printf '%s' 'N/D - comando timeout indisponivel'
-        return
+    if [[ -r "$cache_file" ]]; then
+        IFS='|' read -r count _ < "$cache_file"
+        [[ "$count" =~ ^[0-9]+$ ]] && printf '%s' "$count" && return
     fi
 
-    case "$os_id" in
-        rhel|rocky|almalinux|centos|fedora)
-            if command_exists dnf; then
-                output=$(timeout --signal=TERM "${timeout_seconds}s" dnf -q --cacheonly list --upgrades 2>/dev/null) || command_status=$?
-                if [[ "$command_status" -eq 0 ]]; then
-                    count=$(printf '%s\n' "$output" \
-                        | awk 'NF >= 3 && $1 !~ /^(Installed|Available|Last|Obsoleting|Updating|Security:)/ {total++} END {print total + 0}')
-                fi
-            elif command_exists yum; then
-                output=$(timeout --signal=TERM "${timeout_seconds}s" yum -q --cacheonly check-update 2>/dev/null) || command_status=$?
-                if [[ "$command_status" -eq 0 || "$command_status" -eq 100 ]]; then
-                    count=$(printf '%s\n' "$output" \
-                        | awk 'NF >= 3 && $1 !~ /^(Loaded|Last|Obsoleting|Security:)/ {total++} END {print total + 0}')
-                fi
-            fi
-            ;;
-        sles|opensuse*|suse)
-            if command_exists zypper; then
-                output=$(timeout --signal=TERM "${timeout_seconds}s" zypper --non-interactive --quiet --no-refresh list-updates 2>/dev/null) || command_status=$?
-                if [[ "$command_status" -eq 0 ]]; then
-                    count=$(printf '%s\n' "$output" \
-                        | awk -F'|' '/^[[:space:]]*[v>][[:space:]]*\|/ {total++} END {print total + 0}')
-                fi
-            fi
-            ;;
-    esac
-
-    if [[ "$command_status" -eq 124 ]]; then
-        printf '%s' "N/D - consulta excedeu ${timeout_seconds}s"
-    elif [[ "$count" =~ ^[0-9]+$ ]]; then
-        printf '%s' "$count"
-    elif [[ "$count" == 'N/D' ]]; then
-        printf '%s' 'N/D - gerenciador indisponivel'
-    else
-        printf '%s' 'N/D - falha na consulta'
-    fi
+    printf '%s' 'N/D - cache ainda nao atualizado'
 }
 
 get_last_os_update() {
-    local last_update=''
-    local os_id=${ID:-unknown}
+    local cache_file=${PORTO_UPDATE_CACHE:-/var/cache/porto-banner/updates}
+    local count last_update
 
-    case "$os_id" in
-        rhel|rocky|almalinux|centos|fedora)
-            if command_exists dnf; then
-                last_update=$(dnf -q history info last 2>/dev/null \
-                    | awk -F': ' 'tolower($1) ~ /^(start|begin)/ {print $2; exit}')
-            elif command_exists yum; then
-                last_update=$(yum -q history info last 2>/dev/null \
-                    | awk -F': ' 'tolower($1) ~ /^(start|begin)/ {print $2; exit}')
-            fi
-            ;;
-        sles|opensuse*|suse)
-            if [[ -r /var/log/zypp/history ]]; then
-                last_update=$(awk -F'|' '$2 ~ /^(install|update|remove|patch|dup)/ {last = $1} END {print last}' /var/log/zypp/history)
-            fi
-            ;;
-    esac
+    if [[ -r "$cache_file" ]]; then
+        IFS='|' read -r count last_update < "$cache_file"
+        [[ -n "$last_update" ]] && printf '%s' "$last_update" && return
+    fi
 
-    [[ -n "$last_update" ]] && printf '%s' "$last_update" || printf '%s' 'N/D - historico indisponivel'
+    printf '%s' 'N/D - cache ainda nao atualizado'
 }
 
 get_last_reboot() {
@@ -353,10 +308,23 @@ print_status_line() {
 
 # Carrega identificadores da distribuicao sem assumir uma familia especifica.
 ID='unknown'
+ID_LIKE=''
 PRETTY_NAME=''
 if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
     . /etc/os-release
+fi
+
+OS_FAMILY='unknown'
+case "$ID $ID_LIKE" in
+    *sles*|*suse*|*opensuse*) OS_FAMILY='suse' ;;
+    *rhel*|*rocky*|*almalinux*|*centos*|*fedora*|*oracle*) OS_FAMILY='rpm' ;;
+esac
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    PORTO_CHECK_UPDATES=${PORTO_CHECK_UPDATES:-1}
+else
+    PORTO_CHECK_UPDATES=${PORTO_CHECK_UPDATES:-0}
 fi
 
 OS_NAME=$(get_os_name)
@@ -445,11 +413,13 @@ else
         print_status_line 'UPDATES PENDENTES' "$PATCH_COUNT pacote(s) disponivel(is)" 'problem'
     fi
 fi
-print_line 'ULTIMA ATUALIZACAO SO' "$LAST_OS_UPDATE"
-print_line 'ULTIMO REBOOT' "$LAST_REBOOT"
+print_status_line 'ULTIMA ATUALIZACAO SO' "$LAST_OS_UPDATE" 'problem'
+print_status_line 'ULTIMO REBOOT' "$LAST_REBOOT" 'problem'
 
 printf '\n'
 color "$DIM" "Banner informativo | $(date '+%d/%m/%Y %H:%M:%S')"; printf '\n'
 printf '\n'
 
-exit 0
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
