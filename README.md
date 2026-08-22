@@ -1,4 +1,4 @@
-# Tiago Nascimento | SysAdmin Linux e Automação
+# Tiago Nascimento | SysAdm Linux, Automação, Infaestrutura
 
 Profissional de Tecnologia da Informação com mais de **10 anos de experiência** em infraestrutura, operações, suporte e administração de ambientes Linux.
 
