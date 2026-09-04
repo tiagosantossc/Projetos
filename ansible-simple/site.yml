@@ -1,0 +1,61 @@
+---
+- name: Instalar banner Porto e configurar atualizacao via cron
+  hosts: linux
+  become: "{{ ansible_user | default('') != 'root' }}"
+  gather_facts: true
+
+  tasks:
+    - name: Validar familia Linux suportada
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family in ['RedHat', 'Suse']
+        fail_msg: >-
+          Sistema nao suportado: {{ ansible_facts.distribution }}.
+          Use RHEL/Rocky/Alma/CentOS Stream ou SLES/openSUSE.
+
+    - name: Instalar dependencia timeout
+      ansible.builtin.package:
+        name: coreutils
+        state: present
+
+    - name: Instalar banner de login
+      ansible.builtin.copy:
+        src: ../scripts/banner.sh
+        dest: /etc/profile.d/banner.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Instalar atualizador de pacotes
+      ansible.builtin.copy:
+        src: ../scripts/update-check.sh
+        dest: /usr/local/sbin/update-check.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Criar diretorio do cache
+      ansible.builtin.file:
+        path: /var/cache/porto-banner
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Criar cron para atualizar o cache a cada hora
+      ansible.builtin.copy:
+        dest: /etc/cron.d/porto-update-check
+        owner: root
+        group: root
+        mode: '0644'
+        content: "0 * * * * root /usr/local/sbin/update-check.sh >/dev/null 2>&1\n"
+
+    - name: Atualizar cache inicial
+      ansible.builtin.command: /usr/local/sbin/update-check.sh
+      register: cache_result
+      changed_when: false
+      failed_when: false
+
+    - name: Mostrar resultado da atualizacao inicial
+      ansible.builtin.debug:
+        msg: "{{ cache_result.stdout | default('Cache nao atualizado') }}"

@@ -1,0 +1,70 @@
+---
+- name: Configurar banner operacional Porto
+  hosts: linux
+  become: false
+  gather_facts: true
+
+  vars:
+    porto_banner_src: /root/banner.sh
+    porto_update_check_src: /root/update-check.sh
+
+  pre_tasks:
+    - name: Validar distribuicao suportada
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family in ['RedHat', 'Suse']
+        fail_msg: >-
+          Distribuicao nao suportada: {{ ansible_facts.distribution }}
+          (familia {{ ansible_facts.os_family }}). Use RHEL/Rocky/Alma/CentOS
+          Stream ou SLES/openSUSE em ciclo de vida ativo.
+
+  tasks:
+    - name: Instalar dependencias do atualizador
+      ansible.builtin.package:
+        name: coreutils
+        state: present
+
+    - name: Instalar banner de login
+      ansible.builtin.copy:
+        src: "{{ porto_banner_src }}"
+        dest: /etc/profile.d/banner.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Instalar atualizador de cache
+      ansible.builtin.copy:
+        src: "{{ porto_update_check_src }}"
+        dest: /usr/local/sbin/update-check.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Criar diretorio do cache
+      ansible.builtin.file:
+        path: /var/cache/porto-banner
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Configurar cron para atualizar o cache a cada hora
+      ansible.builtin.copy:
+        dest: /etc/cron.d/porto-update-check
+        owner: root
+        group: root
+        mode: '0644'
+        content: "0 * * * * root /usr/local/sbin/update-check.sh >/dev/null 2>&1\n"
+
+    - name: Atualizar cache inicial sem bloquear o banner
+      ansible.builtin.command: /usr/local/sbin/update-check.sh
+      register: porto_cache_result
+      changed_when: false
+      failed_when: false
+
+    - name: Informar resultado do cache inicial
+      ansible.builtin.debug:
+        msg: >-
+          {{ porto_cache_result.stdout | default('') }}
+          {{ porto_cache_result.stderr | default('') }}
+

@@ -1,0 +1,10 @@
+[Unit]
+Description=Agenda a verificacao de updates do banner Porto
+
+[Timer]
+OnCalendar={{ porto_update_interval }}
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target

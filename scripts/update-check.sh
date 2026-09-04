@@ -65,8 +65,11 @@ if [[ ! "$count" =~ ^[0-9]+$ ]]; then
 fi
 
 mkdir -p "$CACHE_DIR"
+chmod 0755 "$CACHE_DIR"
+chown root:root "$CACHE_DIR"
 tmp_file=$(mktemp "${CACHE_FILE}.tmp.XXXXXX")
 printf '%s|%s\n' "$count" "${last_update:-N/D}" > "$tmp_file"
+chown root:root "$tmp_file"
 chmod 0644 "$tmp_file"
 mv -f "$tmp_file" "$CACHE_FILE"
 

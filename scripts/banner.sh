@@ -217,7 +217,7 @@ get_network_health() {
 }
 
 get_patch_count() {
-    local cache_file=${PORTO_UPDATE_CACHE:-/var/cache/porto-banner/updates}
+    local cache_file=/var/cache/porto-banner/updates
     local count=''
 
     if [[ -r "$cache_file" ]]; then
@@ -229,7 +229,7 @@ get_patch_count() {
 }
 
 get_last_os_update() {
-    local cache_file=${PORTO_UPDATE_CACHE:-/var/cache/porto-banner/updates}
+    local cache_file=/var/cache/porto-banner/updates
     local count last_update
 
     if [[ -r "$cache_file" ]]; then
